@@ -1,0 +1,69 @@
+version: "3.8"
+
+# Media Assets Marketing Agent — LightRAG + Neo4j
+# Usage: docker compose up -d
+
+services:
+  # ── Neo4j Graph Database ─────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.15.0
+    container_name: media_assets_neo4j
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol
+    environment:
+      - NEO4J_AUTH=neo4j/lightrag2026
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "lightrag2026", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── LightRAG Server ─────────────────────────────────────────────────
+  lightrag:
+    image: ghcr.io/hkuds/lightrag:latest
+    container_name: media_assets_lightrag
+    ports:
+      - "9621:9621"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      # LLM
+      - LLM_BINDING=${LLM_BINDING:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Embeddings
+      - EMBEDDING_BINDING=${EMBEDDING_BINDING:-openai}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
+      # Storage
+      - GRAPH_STORAGE=Neo4JStorage
+      - VECTOR_STORAGE=NanoVectorDBStorage
+      - KV_STORAGE=JsonKVStorage
+      - DOC_STATUS_STORAGE=JsonDocStatusStorage
+      # Neo4j
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USERNAME=neo4j
+      - NEO4J_PASSWORD=lightrag2026
+      # Server
+      - HOST=0.0.0.0
+      - PORT=9621
+      - WEBUI_ENABLED=true
+      # Chunking
+      - CHUNK_SIZE=1200
+      - CHUNK_OVERLAP_SIZE=200
+    volumes:
+      - ./data/lightrag:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9621/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

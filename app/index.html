@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Media Assets Explorer</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <script src="https://unpkg.com/marked/marked.min.js"></script>
+  <script src="https://unpkg.com/force-graph"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <div class="header">
+    <h1>&#x1f5bc;&#xfe0f; Media Assets Explorer <span>&middot; LightRAG</span></h1>
+    <div class="tabs">
+      <button class="tab" :class="{active: activeTab==='query'}" @click="activeTab='query'">&#128269; Query</button>
+      <button class="tab" :class="{active: activeTab==='graph'}" @click="activeTab='graph'; loadGraph()">&#128376; Graph</button>
+    </div>
+    <div class="status">
+      <div class="status-dot" :class="healthy ? 'ok' : 'err'"></div>
+      {{ healthy ? 'Connected' : 'Disconnected' }}
+      <span v-if="healthy" style="margin-left:8px">&middot; {{ graphStats.nodes }} nodes &middot; {{ graphStats.edges }} edges</span>
+    </div>
+  </div>
+  <div class="main">
+    <!-- QUERY TAB -->
+    <div v-show="activeTab==='query'" class="query-panel" style="width:100%">
+      <div class="search-bar">
+        <input class="search-input" v-model="query" @keyup.enter="search"
+               placeholder="Search your image library... (e.g. sunset beach, professional headshots)">
+        <select class="mode-select" v-model="queryMode">
+          <option value="naive">Naive</option><option value="local">Local</option>
+          <option value="global">Global</option><option value="hybrid">Hybrid</option>
+          <option value="mix">Mix</option>
+        </select>
+        <button class="search-btn" @click="search" :disabled="searching || !query.trim()">
+          {{ searching ? 'Searching...' : 'Search' }}
+        </button>
+      </div>
+      <div class="results-area">
+        <div v-if="searching" class="loading">
+          <div class="spinner"></div> Querying LightRAG ({{ queryMode }} mode)...
+        </div>
+        <div v-else-if="!queryResult && !queryError" class="empty">
+          <p style="font-size:32px;margin-bottom:12px">&#128269;</p>
+          <p>Ask anything about your image assets</p>
+          <p style="margin-top:8px;font-size:12px;color:var(--text-dim)">
+            Try: sunset photos, images with people, blue color palette, food photography
+          </p>
+        </div>
+        <div v-if="queryError" class="result-card" style="border-color:var(--red)">
+          <h3 style="color:var(--red)">Error</h3>
+          <p class="result-text">{{ queryError }}</p>
+        </div>
+        <div v-if="queryResult" class="result-card">
+          <h3>&#128269; {{ queryMode.toUpperCase() }} Results</h3>
+          <div class="result-text" v-html="renderedResult"></div>
+        </div>
+        <div v-if="extractedImages.length" class="result-card">
+          <h3>&#x1f5bc;&#xfe0f; Referenced Images ({{ extractedImages.length }})</h3>
+          <div class="carousel">
+            <div class="carousel-track">
+              <div class="carousel-slide" v-for="img in extractedImages" :key="img"
+                   @click="lightboxImage='../imgs/'+img">
+                <img :src="'../imgs/'+img" :alt="img" loading="lazy"
+                     @error="$event.target.parentElement.style.display='none'">
+                <div class="carousel-caption">{{ img.replace(/-unsplash/,'').replace(/\.\w+$/,'').replace(/[-_]/g,' ') }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- GRAPH TAB -->
+    <div v-show="activeTab==='graph'" class="graph-panel" style="width:100%">
+      <div class="graph-controls">
+        <label>Community:</label>
+        <select v-model="graphLabel" @change="loadGraph">
+          <option value="">All</option>
+          <option v-for="l in availableLabels" :key="l" :value="l">{{ l }}</option>
+        </select>
+        <label style="margin-left:12px">Search:</label>
+        <input type="text" v-model="nodeSearch" placeholder="Filter nodes..." @input="filterNodes">
+        <span style="margin-left:auto;font-size:11px;color:var(--text-dim)">
+          {{ graphData.nodes.length }} nodes &middot; {{ graphData.edges.length }} edges
+        </span>
+      </div>
+      <div class="graph-container">
+        <div id="graph-canvas"></div>
+        <div v-if="loadingGraph" class="loading"
+             style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%)">
+          <div class="spinner"></div> Loading graph...
+        </div>
+        <div v-if="selectedNode" class="node-detail">
+          <button class="close-btn" @click="selectedNode=null">&#10005;</button>
+          <h3>{{ selectedNode.id }}</h3>
+          <span class="type-badge"
+                :style="{background:typeColor(selectedNode.properties?.entity_type,.15),
+                         color:typeColor(selectedNode.properties?.entity_type)}">
+            {{ selectedNode.properties?.entity_type || 'unknown' }}
+          </span>
+          <p class="desc">{{ cleanDesc(selectedNode.properties?.description) }}</p>
+          <div class="neighbors" v-if="selectedNodeNeighbors.length">
+            <h4>Neighbors ({{ selectedNodeNeighbors.length }})</h4>
+            <div class="neighbor-item" v-for="n in selectedNodeNeighbors" :key="n"
+                 @click="focusNode(n)">&rarr; {{ n }}</div>
+          </div>
+          <div v-if="nodeImageFile(selectedNode)" style="margin-top:16px">
+            <img :src="'../imgs/'+nodeImageFile(selectedNode)"
+                 style="width:100%;border-radius:8px;cursor:pointer"
+                 @click="lightboxImage='../imgs/'+nodeImageFile(selectedNode)"
+                 @error="$event.target.style.display='none'">
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- LIGHTBOX -->
+  <div v-if="lightboxImage" class="lightbox" @click="lightboxImage=null">
+    <img :src="lightboxImage" @click.stop>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

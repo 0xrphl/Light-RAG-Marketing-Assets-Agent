@@ -1,0 +1,32 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Pre-ingested data (stored on HuggingFace, downloaded via setup.py)
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+ingestion_progress.json
+
+# Generator scripts
+_gen*.py
+_tpl_*
