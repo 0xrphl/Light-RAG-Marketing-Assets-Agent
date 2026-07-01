@@ -300,6 +300,235 @@ docker compose down -v        # Stop + remove volumes
 
 ---
 
-## 📝 License
+## 🔬 Deep Dive: `ingest.py` — How the Pipeline Works
+
+### Gemini Vision Prompt — 8 Structured Sections
+
+Each image is base64-encoded and sent to the **Gemini Vision API** (`gemini-3.5-flash`, temperature `0.3`, max `4096` tokens) with a detailed structured prompt that forces the model to extract information across **8 orthogonal dimensions**:
+
+| # | Prompt Section | What It Extracts | Why It Matters for Search |
+|---|---------------|------------------|--------------------------|
+| 1 | **CORE DESCRIPTION** | Subject, scene, composition (2-3 sentences) | Grounds the asset's identity — what IS this image |
+| 2 | **OBJECTS & ELEMENTS** | Exhaustive list of every visible item, prop, animal, clothing | Enables object-level search ("images with laptops") |
+| 3 | **COLORS & PALETTE** | Primary/secondary colors, color mood, color harmony type | Style-based retrieval ("warm earth tones", "high contrast") |
+| 4 | **PEOPLE & DEMOGRAPHICS** | Count, age range, gender, clothing, expressions, activities | Audience matching ("professional women", "diverse teams") |
+| 5 | **SETTING & PLACE** | Indoor/outdoor, architecture, time of day, season, geography | Location-based queries ("urban rooftop", "tropical beach") |
+| 6 | **PHOTOGRAPHY & STYLE** | Shot type, angle, lighting, focus, post-processing | Technical queries ("shallow DOF portraits", "aerial shots") |
+| 7 | **MOOD & ATMOSPHERE** | 3-5 mood descriptors, emotional tone, energy level | Emotional search ("calm serene images", "dynamic energetic") |
+| 8 | **MARKETING USE CASES + TAGS** | Industries, campaigns, audiences, themes, 30-50 tags | Direct campaign targeting ("healthcare ads for millennials") |
+
+> **Design decision:** Low temperature (0.3) ensures consistent, factual descriptions. High token limit (4096) allows exhaustive detail — every tag and attribute becomes a potential graph entity.
+
+### Why 5 Chunks Per Image (Not 1 or 8)
+
+The Gemini response is split into **5 labeled chunks** before ingestion into LightRAG. This is a deliberate design choice:
+
+| Chunk | doc_id Pattern | Sections Combined | Rationale |
+|-------|---------------|-------------------|-----------|
+| **Core** | `{stem}__core` | Core Description + Objects & Elements | Identity grounding — what the image IS. Objects become entity nodes linked to the image. |
+| **Visual** | `{stem}__visual` | Colors & Palette + Photography & Style | Enables style/palette/technique-based graph edges. "Golden hour" links to "warm tones" links to "sunset". |
+| **People & Setting** | `{stem}__people_setting` | People & Demographics + Setting & Place + Mood | Human context — demographics, location, emotion form a rich subgraph for audience targeting. |
+| **Marketing** | `{stem}__marketing` | Marketing Use Cases + Tags | Direct campaign/industry/audience entities. The 30-50 tags become highly-connected hub nodes. |
+| **Full** | `{stem}__full` | Complete analysis (all 8 sections) | Holistic document lets LightRAG discover **cross-section entity links** (e.g., "golden hour" ↔ "warm tones" ↔ "wellness campaign"). |
+
+> **Why not 1 chunk?** A single mega-document dilutes entity extraction — GPT-4o's context window gets overwhelmed and misses fine-grained connections. **Why not 8?** Too many tiny chunks fragment the graph; related concepts (e.g., colors + photography) need to co-occur in the same chunk for LightRAG to extract their relationship.
+
+> **Why include a Full chunk?** The Full chunk is the "glue" — it lets LightRAG see ALL entities together in one document, creating cross-domain edges that the focused chunks miss. Without it, "beach" (from Setting) would never directly link to "travel campaign" (from Marketing) in the graph.
+
+### Batch Processing & Resilience
+
+```
+ingest.py pipeline:
+  1. Scan imgs/ for JPG/PNG/WebP/GIF/BMP/TIFF files (sorted)
+  2. For each image:
+     a. Base64 encode → POST to Gemini API (with retry on timeout)
+     b. Parse response: split on "## " headers → dict of 8 sections
+     c. build_chunks() → 5 labeled text documents with metadata headers
+     d. POST each chunk to LightRAG /documents/text endpoint
+     e. 150ms delay between chunks, 500ms between images
+  3. Every --batch-size images → 2s pause (rate limit protection)
+  4. Progress saved to ingestion_progress.json after every image
+  5. --resume flag skips already-ingested images (idempotent reruns)
+```
+
+Each chunk includes metadata headers like `[IMAGE ASSET: filename.jpg]` and `[CHUNK: Core Description & Objects]` so LightRAG can trace entities back to their source image and chunk type.
+
+---
+
+## 💼 Marketing Use Cases & Enterprise Potential
+
+This project demonstrates a **production-ready pattern** for AI-powered media asset management. The architecture — **Vision AI → structured text → GraphRAG → multi-mode retrieval** — is directly applicable to enterprise-scale media operations.
+
+### 🏢 Enterprise Media Asset Bank
+
+| Use Case | How This Pipeline Helps |
+|----------|------------------------|
+| **Corporate image libraries** | Ingest thousands of brand photos, product shots, event photography. Query by mood, audience, brand attribute — not just filename. |
+| **Publishing & editorial** | Photo desks find contextually relevant images for articles. Graph edges connect "healthcare" ↔ "diverse team" ↔ "office setting" ↔ "professional" for instant mood-board generation. |
+| **E-commerce catalogs** | Auto-extract product attributes (colors, materials, styles, demographics) from product shots. "Show me all lifestyle images with millennial women in casual wear." |
+| **Real estate / architecture** | Building photos, interior design assets searchable by style, room type, features, color palette. Graph connects "minimalist" ↔ "white walls" ↔ "natural light" ↔ "Scandinavian style". |
+| **Stock photo agencies** | Replace flat tag taxonomies with a knowledge graph. Find images by semantic relationship chains, not keyword matches. |
+| **Museums & archives** | Digitized collections with rich metadata extraction — period, style, subject, emotional tone — all graph-linked for scholarly exploration. |
+
+**Scale potential:** The pipeline processes ~420 images in ~2 hours. With parallelized Gemini calls and batch LightRAG ingestion, enterprise deployments can handle **10,000+ assets** with the same architecture.
+
+### 🎨 AI Image Generation Bank — Auto-Cataloging Generated Assets
+
+Connect to image generation tools to **automatically catalog every generated asset** the moment it's created:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    AI IMAGE GENERATION PIPELINE                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  DALL-E 3 / Midjourney / Stable Diffusion / Flux                   │
+│          │                                                          │
+│          ▼                                                          │
+│  Generated Image ──→ Save to Asset Library (S3 / local)            │
+│          │                                                          │
+│          ▼                                                          │
+│  Gemini Vision Analysis (8-section structured prompt)               │
+│          │                                                          │
+│          ▼                                                          │
+│  5 Chunks ──→ LightRAG ──→ Knowledge Graph + Vector DB             │
+│                                    │                                │
+│                                    ▼                                │
+│  ┌──────────────────────────────────────────────────┐               │
+│  │ Searchable by: style, mood, subject, colors,     │               │
+│  │ industry fit, campaign type, target audience,     │               │
+│  │ similar existing assets (graph neighborhood)      │               │
+│  └──────────────────────────────────────────────────┘               │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Key capabilities:**
+- **Auto-tag generated images** as they're created — no manual tagging labor
+- **Deduplicate visually** — graph relationships surface near-identical generated assets before they clutter the library
+- **Cross-reference generated vs. stock** — find which stock photos match the style of your AI-generated hero images (and vice versa)
+- **Prompt-to-asset traceability** — store generation prompts alongside Gemini analysis to build a prompt → visual outcome knowledge base
+- **Brand consistency scoring** — query the graph: "How similar is this generated image to our existing brand assets in terms of color palette, mood, and style?"
+
+### ⚡ n8n / Make / Zapier — Automation Workflow Recipes
+
+Integrate with **n8n**, **Make**, or **Zapier** for fully automated marketing pipelines. The LightRAG REST API (`/documents/text`, `/query`) makes integration trivial:
+
+| Workflow | Trigger | Pipeline | Output |
+|----------|---------|----------|--------|
+| **Auto-ingest on upload** | New image uploaded to S3/GDrive/Dropbox | → Gemini Vision → 5 chunks → LightRAG POST | Asset auto-cataloged in knowledge graph |
+| **Campaign asset finder** | Marketing brief form submitted | → Extract keywords → Query LightRAG (hybrid mode) | Ranked image suggestions with explanations |
+| **Social media scheduler** | Content calendar event | → Query by mood/theme/audience → Select best asset → Post to Buffer/Hootsuite | Auto-selected on-brand image published |
+| **Brand compliance check** | New asset uploaded by external agency | → Gemini analysis → Compare against brand entity cluster in graph | Pass/fail report with visual attribute diff |
+| **Seasonal content surfacing** | Cron trigger (weekly/monthly) | → Query "spring outdoor wellness" or "winter holiday festive" | Pre-curated seasonal asset collections |
+| **DAM ↔ Knowledge Graph sync** | Asset updated/deleted in DAM (Bynder, Brandfolder) | → Webhook → Re-analyze or remove from LightRAG graph | Graph always reflects current DAM state |
+| **Client mood board generator** | Client brief uploaded (PDF/doc) | → Extract themes with LLM → Query LightRAG per theme → Compile grid | Auto-generated mood board PDF/Figma frame |
+| **Competitor visual analysis** | Scrape competitor social feeds | → Download images → Gemini analysis → Ingest into separate graph | "What visual themes does competitor X use that we don't?" |
+
+**Example n8n flow:**
+
+```
+┌────────────┐     ┌────────────┐     ┌──────────────────┐     ┌─────────────┐
+│  Google     │     │  Gemini    │     │  LightRAG        │     │  Slack      │
+│  Drive      │────▶│  Vision    │────▶│  /documents/text │────▶│  Notify     │
+│  (trigger)  │     │  API       │     │  (POST 5 chunks) │     │  #assets    │
+└────────────┘     └────────────┘     └──────────────────┘     └─────────────┘
+  "New file in       "Analyze &          "Ingest into          "✅ beach-sunset.jpg
+   /brand-assets"     extract 8           knowledge graph"      ingested: 32 entities
+                      sections"                                  extracted, linked to
+                                                                 'travel', 'wellness',
+                                                                 'golden-hour'"
+```
+
+### 📢 Campaign & Publishing Workflows
+
+The knowledge graph transforms how creative teams discover and deploy visual assets:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CAMPAIGN ASSET WORKFLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. BRIEF           2. GRAPH QUERY           3. CURATION        4. DEPLOY  │
+│  ┌──────────┐       ┌──────────────┐         ┌──────────┐      ┌────────┐  │
+│  │ "Summer  │       │ hybrid mode: │         │ 15 images│      │ Social │  │
+│  │  wellness│──────▶│ "outdoor,    │────────▶│ ranked   │─────▶│ Web    │  │
+│  │  campaign│       │  warm light, │         │ by graph │      │ Print  │  │
+│  │  for     │       │  active,     │         │ relevance│      │ Email  │  │
+│  │  Gen Z"  │       │  nature,     │         │ + human  │      │ Ads    │  │
+│  └──────────┘       │  wellness"   │         │ review   │      └────────┘  │
+│                     └──────────────┘         └──────────┘                   │
+│                                                                             │
+│  WHY GRAPH BEATS TAGS:                                                      │
+│  • Tag search: "wellness" → 50 results (many irrelevant)                   │
+│  • Graph search: "wellness" + 1-hop → connected to "outdoor", "active",    │
+│    "warm light", "millennial", "yoga" → 12 precise results                 │
+│  • Mix mode: vector similarity + graph traversal → 8 perfect matches       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Use cases by industry:**
+
+| Industry | Workflow | Graph Advantage |
+|----------|----------|-----------------|
+| **Advertising agencies** | Rapid asset discovery for client pitches, mood boards, campaign decks | Graph neighborhood reveals unexpected visual connections — "this office shot also links to 'innovation' and 'diversity'" |
+| **Social media teams** | Find on-brand images by emotion + color palette + target demographic | Entity-linked taxonomy ensures visual consistency across Instagram, LinkedIn, TikTok |
+| **Content marketing** | Match blog topics to relevant imagery using semantic + graph search | "Find images that connect to both 'technology' AND 'human warmth'" — impossible with flat tags |
+| **Brand management** | Audit visual consistency across 10,000+ assets across channels | Community detection (Leiden clusters) reveals natural visual themes in your library |
+| **News & media** | Photo desk finds contextually relevant images for breaking stories in seconds | Graph edges connect "protest" ↔ "urban" ↔ "crowd" ↔ "signs" — not just keyword "protest" |
+| **Education / e-learning** | Organize educational media by subject, mood, accessibility needs | "Find calming science images suitable for anxious learners" — mood + subject + audience graph query |
+| **Pharmaceutical / healthcare** | Compliant image selection for regulated marketing materials | Graph can encode compliance attributes as entities — "approved for EU markets" as a node |
+| **Travel & hospitality** | Destination marketing with mood-matched seasonal imagery | "Summer Mediterranean luxury" traverses mood → setting → season → style graph paths |
+
+### 🏗️ Enterprise Architecture — Where This Fits
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     ENTERPRISE MEDIA ECOSYSTEM                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─────────────┐    ┌──────────────┐    ┌─────────────────────┐    │
+│  │ DAM System  │    │ AI Gen Tools │    │ Stock Photo APIs    │    │
+│  │ (Bynder,    │    │ (DALL-E,     │    │ (Getty, Shutterstock│    │
+│  │ Brandfolder,│    │ Midjourney,  │    │ Unsplash, Pexels)   │    │
+│  │ Adobe AEM)  │    │ Flux, SD)    │    │                     │    │
+│  └──────┬──────┘    └──────┬───────┘    └──────────┬──────────┘    │
+│         │                  │                       │               │
+│         ▼                  ▼                       ▼               │
+│  ┌─────────────────────────────────────────────────────────┐       │
+│  │            ingest.py — Vision AI Pipeline                │       │
+│  │  Gemini Vision → 8-section analysis → 5 chunks/image   │       │
+│  └────────────────────────┬────────────────────────────────┘       │
+│                           │                                        │
+│                           ▼                                        │
+│  ┌─────────────────────────────────────────────────────────┐       │
+│  │         LightRAG — Knowledge Graph + Vector DB          │       │
+│  │  13K+ entities · 23K+ relationships · 1536-d embeddings │       │
+│  └────────────────────────┬────────────────────────────────┘       │
+│                           │                                        │
+│         ┌─────────────────┼─────────────────┐                      │
+│         ▼                 ▼                  ▼                      │
+│  ┌────────────┐   ┌─────────────┐   ┌──────────────┐              │
+│  │ n8n / Make │   │ Explorer    │   │ REST API     │              │
+│  │ Workflows  │   │ Web App     │   │ Integration  │              │
+│  │ (automated │   │ (query +    │   │ (CMS, social │              │
+│  │ campaigns) │   │ graph viz)  │   │ schedulers)  │              │
+│  └────────────┘   └─────────────┘   └──────────────┘              │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 🔮 Future Directions
+
+- **Multi-modal embeddings** — CLIP/SigLIP for direct image-to-image similarity alongside text-based graph
+- **Video frame extraction** — Extend pipeline to video assets (keyframe analysis + temporal graph)
+- **Brand style guides as graph nodes** — Encode brand colors, fonts, tone-of-voice as entities for compliance queries
+- **Collaborative tagging** — Human-in-the-loop refinement of auto-extracted entities via the Explorer app
+- **API gateway** — REST API for external DAM/CMS integration (Bynder, Brandfolder, Adobe AEM)
+- **Real-time ingestion** — WebSocket-based pipeline for live event photography (conference photo → graph in < 30s)
+- **Multi-tenant graph** — Isolated subgraphs per client/brand with shared entity vocabulary
+- **Cost optimization** — Gemini Flash for analysis (~$0.002/image), GPT-4o-mini for entity extraction, local embeddings for air-gapped deployments
+
+---
+
+## � License
 
 MIT License
